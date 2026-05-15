@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NTKMA Media Intelligence Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <style>
+        * { font-family: 'Inter', system-ui, sans-serif; }
+        body { background: #0f172a; }
+        .glass { background: rgba(15, 23, 42, 0.7); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.08); }
+        .gradient-text { background: linear-gradient(135deg, #60a5fa, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .card-hover { transition: all 0.3s ease; }
+        .card-hover:hover { transform: translateY(-2px); box-shadow: 0 20px 40px rgba(0,0,0,0.3); }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        .slide-in { animation: slideIn 0.5s ease-out; }
+        .animate-pulse-slow { animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    </style>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: { extend: { fontFamily: { sans: ['Inter', 'system-ui'] } } }
+        }
+    </script>
+</head>
+<body class="bg-slate-950 text-white min-h-screen">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback, useRef, useMemo } = React;
+
+        const API_BASE = window.location.origin + '/api';
+        const THEMES = ["Infrastructure","Environment","Governance","Religious Affairs","Security","Mobility","Economy/Tourism","Technology","Land Acquisition","Sanitation","Heritage","Public Health","Finance/Budget","Other"];
+        const SENTIMENTS = ["Positive","Negative","Neutral"];
+        const IMPORTANCE = ["Critical","High","Medium","Low"];
+
+        // API Service
+        const api = {
+            token: localStorage.getItem('ntkma_token'),
+            headers() {
+                return {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': this.token
+                };
+            },
+            async request(endpoint, options = {}) {
+                const res = await fetch(API_BASE + endpoint, {
+                    ...options,
+                    headers: { ...this.headers(), ...options.headers }
+                });
+                if (res.status === 401) {
+                    localStorage.removeItem('ntkma_token');
+                    localStorage.removeItem('ntkma_user');
+                    window.location.reload();
+                    throw new Error('Session expired');
+                }
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'Request failed');
+                return data;
+            },
+            async login(email, password) {
+                return this.request('/auth/login', {
+                    method: 'POST',
+                    body: JSON.stringify({ email, password })
+                });
+            },
+            async register(email, password, name) {
+                return this.request('/auth/register', {
+                    method: 'POST',
+                    body: JSON.stringify({ email, password, name })
+                });
+            },
+            async getArticles(filters = {}) {
+                const params = new URLSearchParams(filters);
+                return this.request('/articles?' + params);
+            },
+            async addArticle(article) {
+                return this.request('/articles', {
+                    method: 'POST',
+                    body: JSON.stringify(article)
+                });
+            },
+            async generateBrief(articles) {
+                return this.request('/ai/brief', {
+                    method: 'POST',
+                    body: JSON.stringify({ articles })
+                });
+            },
+            async getScraperStatus() {
+                return this.request('/scraper/status');
+            },
+            async toggleScraper() {
+                return this.request('/scraper/toggle', { method: 'POST' });
+            },
+            async runScraper() {
+                return this.request('/scraper/run', { method: 'POST' });
+            }
+        };
+
+        const StatCard = ({ label, value, icon, color, delay }) => {
+            const colorMap = {
+                blue: "from-blue-500/20 to-blue-600/10 border-blue-500/30 text-blue-400",
+                emerald: "from-emerald-500/20 to-emerald-600/10 border-emerald-500/30 text-emerald-400",
+                rose: "from-rose-500/20 to-rose-600/10 border-rose-500/30 text-rose-400",
+                orange: "from-orange-500/20 to-orange-600/10 border-orange-500/30 text-orange-400",
+                violet: "from-violet-500/20 to-violet-600/10 border-violet-500/30 text-violet-400"
+            };
+            return (
+                <div className={`slide-in bg-gradient-to-br ${colorMap[color]} backdrop-blur-xl border rounded-2xl p-5 card-hover`} style={{animationDelay: `${delay}ms`}}>
+                    <div className="flex items-center justify-between">
+                        <span className="text-3xl">{icon}</span>
+                        <div className="text-right">
+                            <p className="text-3xl font-black text-white">{value}</p>
+                            <p className="text-xs font-medium opacity-70 mt-1">{label}</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const LoginScreen = ({ onLogin }) => {
+            const [email, setEmail] = useState("");
+            const [password, setPassword] = useState("");
+            const [name, setName] = useState("");
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState("");
+            const [isLogin, setIsLogin] = useState(true);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setError("");
+                setLoading(true);
+                try {
+                    const data = isLogin 
+                        ? await api.login(email, password)
+                        : await api.register(email, password, name);
+                    localStorage.setItem('ntkma_token', data.token);
+                    localStorage.setItem('ntkma_user', JSON.stringify(data.user));
+                    api.token = data.token;
+                    onLogin(data.user);
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-950 via-blue-950 to-slate-950 relative overflow-hidden">
+                    <div className="absolute inset-0 opacity-20">
+                        <div className="absolute top-20 left-20 w-72 h-72 bg-blue-600 rounded-full blur-3xl animate-pulse-slow"></div>
+                        <div className="absolute bottom-20 right-20 w-96 h-96 bg-violet-600 rounded-full blur-3xl animate-pulse-slow" style={{animationDelay: "1s"}}></div>
+                    </div>
+                    <div className="relative z-10 w-full max-w-md px-6">
+                        <div className="glass rounded-3xl p-8 md:p-10 shadow-2xl">
+                            <div className="text-center mb-8">
+                                <div className="text-6xl mb-4">🕉️</div>
+                                <h1 className="text-3xl font-black gradient-text mb-2">NTKMA Media Monitor</h1>
+                                <p className="text-blue-300/70 text-sm">Nashik-Trimbakeshwar Kumbh 2027 Intelligence Dashboard</p>
+                            </div>
+                            {error && (
+                                <div className="mb-6 p-4 bg-red-500/20 border border-red-500/30 rounded-xl text-red-300 text-sm text-center">
+                                    {error}
+                                </div>
+                            )}
+                            <form onSubmit={handleSubmit} className="space-y-5">
+                                {!isLogin && (
+                                    <div>
+                                        <label className="block text-sm font-semibold text-blue-200/80 mb-2">Full Name</label>
+                                        <input type="text" value={name} onChange={e => setName(e.target.value)}
+                                            className="w-full p-4 bg-white/5 border border-white/10 rounded-2xl text-white placeholder-white/30 focus:ring-2 focus:ring-blue-500/50 outline-none"
+                                            placeholder="Your name" required={!isLogin} />
+                                    </div>
+                                )}
+                                <div>
+                                    <label className="block text-sm font-semibold text-blue-200/80 mb-2">Email Address</label>
+                                    <input type="email" value={email} onChange={e => setEmail(e.target.value)}
+                                        className="w-full p-4 bg-white/5 border border-white/10 rounded-2xl text-white placeholder-white/30 focus:ring-2 focus:ring-blue-500/50 outline-none"
+                                        placeholder="analyst@ntkma.gov.in" required />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-semibold text-blue-200/80 mb-2">Password</label>
+                                    <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                                        className="w-full p-4 bg-white/5 border border-white/10 rounded-2xl text-white placeholder-white/30 focus:ring-2 focus:ring-blue-500/50 outline-none"
+                                        placeholder="••••••••" minLength={6} required />
+                                </div>
+                                <button type="submit" disabled={loading}
+                                    className="w-full bg-gradient-to-r from-blue-600 to-violet-600 text-white py-4 rounded-2xl font-bold text-lg hover:from-blue-700 hover:to-violet-700 transform hover:scale-[1.02] transition-all shadow-lg shadow-blue-500/25 disabled:opacity-50">
+                                    {loading ? "⏳ Authenticating..." : (isLogin ? "Sign In Securely" : "Create Account")}
+                                </button>
+                                <button type="button" onClick={() => { setIsLogin(!isLogin); setError(""); }}
+                                    className="w-full text-blue-300 hover:text-white font-medium py-2 transition-colors text-sm">
+                                    {isLogin ? "Need an account? Register" : "Have an account? Sign In"}
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const Header = ({ stats, activeTab, setActiveTab, onLogout, user, scraperStatus, onToggleScraper }) => {
+            const tabs = [
+                { id: "dashboard", label: "Dashboard", icon: "📊" },
+                { id: "add", label: "Add News", icon: "➕" },
+                { id: "database", label: "Database", icon: "📋" },
+                { id: "ai", label: "AI Brief", icon: "🤖" },
+                { id: "scraper", label: "Scraper", icon: "🔧" },
+                { id: "monitor", label: "Monitor", icon: "🔍" }
+            ];
+
+            return (
+                <header className="sticky top-0 z-50 glass border-b border-white/10">
+                    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4">
+                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                            <div className="flex items-center gap-3">
+                                <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-violet-600 rounded-2xl flex items-center justify-center text-2xl shadow-lg shadow-blue-500/30">
+                                    🕉️
+                                </div>
+                                <div>
+                                    <h1 className="text-xl font-black text-white">NTKMA Media Intelligence</h1>
+                                    <p className="text-xs text-blue-300/60">Kumbh 2027 • {user?.role || "Analyst"} • {user?.name}</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <nav className="flex space-x-1 overflow-x-auto scrollbar-hide pb-1 lg:pb-0">
+                                    {tabs.map(tab => (
+                                        <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+                                            className={`px-4 py-2.5 rounded-xl font-semibold text-sm whitespace-nowrap transition-all duration-200 ${
+                                                activeTab === tab.id
+                                                    ? "bg-gradient-to-r from-blue-600 to-violet-600 text-white shadow-lg shadow-blue-500/25"
+                                                    : "text-slate-400 hover:text-white hover:bg-white/5"
+                                            }`}>
+                                            <span className="mr-1.5">{tab.icon}</span>{tab.label}
+                                        </button>
+                                    ))}
+                                </nav>
+                                <button onClick={onLogout}
+                                    className="p-2.5 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-all border border-red-500/20"
+                                    title="Logout">🚪</button>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4">
+                            <StatCard label="Total Articles" value={stats.total} icon="📈" color="blue" delay={0} />
+                            <StatCard label="Active Themes" value={stats.themes} icon="🎯" color="violet" delay={100} />
+                            <StatCard label="Positive" value={stats.positive} icon="✅" color="emerald" delay={200} />
+                            <StatCard label="Negative" value={stats.negative} icon="⚠️" color="rose" delay={300} />
+                            <StatCard label="Critical" value={stats.critical} icon="🚨" color="orange" delay={400} />
+                        </div>
+
+                        {scraperStatus && (
+                            <div className="mt-3 flex items-center gap-3">
+                                <span className={`w-2 h-2 rounded-full ${scraperStatus.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'}`}></span>
+                                <span className="text-xs text-slate-400">
+                                    Scraper: {scraperStatus.enabled ? 'ACTIVE' : 'INACTIVE'} • {stats.total} articles
+                                </span>
+                                <button onClick={onToggleScraper}
+                                    className="text-xs px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 transition-all">
+                                    {scraperStatus.enabled ? 'Disable' : 'Enable'}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </header>
+            );
+        };
+
+        const SearchBar = ({ query, setQuery, themeFilter, setThemeFilter, sentimentFilter, setSentimentFilter }) => (
+            <div className="glass rounded-2xl p-5 shadow-xl">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <div>
+                        <label className="block text-sm font-semibold text-slate-400 mb-2">🔍 Search Articles</label>
+                        <input type="text" value={query} onChange={e => setQuery(e.target.value)}
+                            placeholder="Headlines, newspapers, stakeholders..."
+                            className="w-full p-3.5 bg-white/5 border border-white/10 rounded-xl text-white placeholder-white/30 focus:ring-2 focus:ring-blue-500/50 outline-none" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-semibold text-slate-400 mb-2">Theme Filter</label>
+                        <select value={themeFilter} onChange={e => setThemeFilter(e.target.value)}
+                            className="w-full p-3.5 bg-white/5 border border-white/10 rounded-xl text-white outline-none">
+                            <option value="All" className="bg-slate-800">All Themes</option>
+                            {THEMES.map(t => <option key={t} value={t} className="bg-slate-800">{t}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-semibold text-slate-400 mb-2">Sentiment Filter</label>
+                        <select value={sentimentFilter} onChange={e => setSentimentFilter(e.target.value)}
+                            className="w-full p-3.5 bg-white/5 border border-white/10 rounded-xl text-white outline-none">
+                            <option value="All" className="bg-slate-800">All Sentiments</option>
+                            {SENTIMENTS.map(s => <option key={s} value={s} className="bg-slate-800">{s}</option>)}
+                        </select>
+                    </div>
+                </div>
+            </div>
+        );
+
+        const DashboardTab = ({ articles }) => {
+            const chartRef1 = useRef(null);
+            const chartRef2 = useRef(null);
+            const chart1Instance = useRef(null);
+            const chart2Instance = useRef(null);
+
+            useEffect(() => {
+                if (chartRef1.current) {
+                    if (chart1Instance.current) chart1Instance.current.destroy();
+                    const ctx = chartRef1.current.getContext('2d');
+                    const themeData = articles.reduce((acc, a) => {
+                        acc[a.theme] = (acc[a.theme] || 0) + 1;
+                        return acc;
+                    }, {});
+                    chart1Instance.current = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: Object.keys(themeData),
+                            datasets: [{
+                                label: 'Articles',
+                                data: Object.values(themeData),
+                                backgroundColor: 'rgba(59, 130, 246, 0.7)',
+                                borderColor: 'rgba(59, 130, 246, 1)',
+                                borderWidth: 1,
+                                borderRadius: 8
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: { legend: { display: false } },
+                            scales: {
+                                y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: 'rgba(255,255,255,0.6)' } },
+                                x: { grid: { display: false }, ticks: { color: 'rgba(255,255,255,0.6)' } }
+                            }
+                        }
+                    });
+                }
+
+                if (chartRef2.current) {
+                    if (chart2Instance.current) chart2Instance.current.destroy();
+                    const ctx = chartRef2.current.getContext('2d');
+                    const sentimentData = SENTIMENTS.map(s => articles.filter(a => a.sentiment === s).length);
+                    chart2Instance.current = new Chart(ctx, {
+                        type: 'doughnut',
+                        data: {
+                            labels: SENTIMENTS,
+                            datasets: [{
+                                data: sentimentData,
+                                backgroundColor: ['rgba(16, 185, 129, 0.8)', 'rgba(239, 68, 68, 0.8)', 'rgba(107, 114, 128, 0.8)'],
+                                borderColor: ['rgba(16, 185, 129, 1)', 'rgba(239, 68, 68, 1)', 'rgba(107, 114, 128, 1)'],
+                                borderWidth: 2
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { position: 'bottom', labels: { color: 'rgba(255,255,255,0.7)', padding: 20 } }
+                            }
+                        }
+                    });
+                }
+
+                return () => {
+                    if (chart1Instance.current) chart1Instance.current.destroy();
+                    if (chart2Instance.current) chart2Instance.current.destroy();
+                };
+            }, [articles]);
+
+            const riskArticles = articles.filter(a => a.importance === "Critical" || a.sentiment === "Negative");
+
+            return (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div className="glass rounded-3xl p-6 shadow-xl">
+                        <h3 className="text-lg font-bold text-white mb-4">📊 Theme Distribution</h3>
+                        <div className="h-80"><canvas ref={chartRef1}></canvas></div>
+                    </div>
+                    <div className="glass rounded-3xl p-6 shadow-xl">
+                        <h3 className="text-lg font-bold text-white mb-4">🎯 Sentiment Analysis</h3>
+                        <div className="h-80"><canvas ref={chartRef2}></canvas></div>
+                    </div>
+                    <div className="glass rounded-3xl p-6 shadow-xl lg:col-span-2">
+                        <h3 className="text-lg font-bold text-white mb-4">🚨 Risk & Escalation Signals</h3>
+                        {riskArticles.length > 0 ? (
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                {riskArticles.slice(0, 6).map(article => (
+                                    <div key={article._id} className="p-5 rounded-2xl bg-gradient-to-br from-red-950/50 to-orange-950/30 border border-red-500/20 hover:border-red-500/40 transition-all card-hover">
+                                        <h4 className="font-bold text-white mb-2 line-clamp-2">{article.headline}</h4>
+                                        <div className="flex flex-wrap gap-2 mb-3">
+                                            <span className="px-2.5 py-1 bg-rose-500/20 text-rose-300 rounded-full text-xs font-semibold">{article.sentiment}</span>
+                                            <span className="px-2.5 py-1 bg-orange-500/20 text-orange-300 rounded-full text-xs font-semibold">{article.importance}</span>
+                                        </div>
+                                        <p className="text-sm text-slate-400 line-clamp-2">{article.summary}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="text-center py-12">
+                                <div className="text-4xl mb-3">🛡️</div>
+                                <p className="text-slate-500 font-medium">No risk signals detected. All clear!</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const AddNewsTab = ({ onArticleAdded }) => {
+            const [form, setForm] = useState({
+                date: new Date().toISOString().split('T')[0],
+                newspaper: "",
+                headline: "",
+                theme: "Governance",
+                sentiment: "Neutral",
+                importance: "Medium",
+                stakeholder: "",
+                summary: "",
+                actionPoint: ""
+            });
+            const [submitting, setSubmitting] = useState(false);
+            const [success, setSuccess] = useState(false);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setSubmitting(true);
+                try {
+                    const article = await api.addArticle(form);
+                    onArticleAdded(article);
+                    setSuccess(true);
+                    setTimeout(() => setSuccess(false), 3000);
+                    setForm({ ...form, headline: "", summary: "", actionPoint: "", newspaper: "" });
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    setSubmitting(false);
+                }
+            };
+
+            const inputClass = "w-full p-3.5 bg-white/5 border border-white/10 rounded-xl text-white placeholder-white/30 focus:ring-2 focus:ring-blue-500/50 outline-none";
+
+            return (
+                <div className="glass rounded-3xl p-6 md:p-8 shadow-xl max-w-4xl mx-auto">
+                    <h3 className="text-xl font-bold text-white mb-6">➕ Add New Article</h3>
+                    {success && (
+                        <div className="mb-6 p-4 bg-emerald-500/20 border border-emerald-500/30 rounded-xl text-emerald-400 font-medium">
+                            ✅ Article saved successfully!
+                        </div>
+                    )}
+                    <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-400 mb-2">Date *</label>
+                            <input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className={inputClass} required />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-400 mb-2">Newspaper *</label>
+                            <input type="text" placeholder="Sakal, Lokmat, TOI..." value={form.newspaper} onChange={e => setForm({...form, newspaper: e.target.value})} className={inputClass} required />
+                        </div>
+                        <div className="md:col-span-2">
+                            <label className="block text-sm font-semibold text-slate-400 mb-2">Headline *</label>
+                            <input type="text" placeholder="Enter exact headline..." value={form.headline} onChange={e => setForm({...form, headline: e.target.value})} className={`${inputClass} text-lg font-medium`} required />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-400 mb-2">Theme</label>
+                            <select value={form.theme} onChange={e => setForm({...form, theme: e.target.value})} className={inputClass}>
+                                {THEMES.map(t => <option key={t} value={t} className="bg-slate-800">{t}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-400 mb-2">Sentiment</label>
+                            <select value={form.sentiment} onChange={e => setForm({...form, sentiment: e.target.value})} className={inputClass}>
+                                {SENTIMENTS.map(s => <option key={s} value={s} className="bg-slate-800">{s}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-400 mb-2">Importance</label>
+                            <select value={form.importance} onChange={e => setForm({...form, importance: e.target.value})} className={inputClass}>
+                                {IMPORTANCE.map(i => <option key={i} value={i} className="bg-slate-800">{i}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-400 mb-2">Stakeholder</label>
+                            <input type="text" placeholder="Government, NGO, Public..." value={form.stakeholder} onChange={e => setForm({...form, stakeholder: e.target.value})} className={inputClass} />
+                        </div>
+                        <div className="md:col-span-2">
+                            <label className="block text-sm font-semibold text-slate-400 mb-2">Summary</label>
+                            <textarea rows={3} placeholder="Brief summary..." value={form.summary} onChange={e => setForm({...form, summary: e.target.value})} className={inputClass} />
+                        </div>
+                        <div className="md:col-span-2">
+                            <label className="block text-sm font-semibold text-slate-400 mb-2">Action Point</label>
+                            <input type="text" placeholder="Recommended follow-up action..." value={form.actionPoint} onChange={e => setForm({...form, actionPoint: e.target.value})} className={inputClass} />
+                        </div>
+                        <div className="md:col-span-2">
+                            <button type="submit" disabled={submitting}
+                                className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 text-white py-4 rounded-2xl font-bold text-lg hover:from-emerald-700 hover:to-teal-700 transform hover:scale-[1.01] transition-all shadow-xl disabled:opacity-50">
+                                {submitting ? "⏳ Saving..." : "✅ Save Article"}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            );
+        };
+
+        const DatabaseTab = ({ articles, pagination, fetchArticles }) => {
+            const [exporting, setExporting] = useState(false);
+
+            const handleExport = async (format) => {
+                setExporting(true);
+                try {
+                    const token = localStorage.getItem('ntkma_token');
+                    const res = await fetch(API_BASE + '/articles/export?format=' + format, {
+                        headers: { 'x-auth-token': token }
+                    });
+                    const blob = await res.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `ntkma-export-${new Date().toISOString().split('T')[0]}.${format}`;
+                    a.click();
+                } catch (err) {
+                    alert('Export failed');
+                } finally {
+                    setExporting(false);
+                }
+            };
+
+            return (
+                <div className="glass rounded-3xl p-6 shadow-xl">
+                    <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+                        <h3 className="text-xl font-bold text-white">📋 Article Database</h3>
+                        <div className="flex gap-3">
+                            <button onClick={() => handleExport('csv')} disabled={exporting}
+                                className="px-4 py-2 bg-blue-600/20 text-blue-400 border border-blue-500/30 rounded-xl font-medium hover:bg-blue-600/30 transition-all text-sm disabled:opacity-50">
+                                📥 CSV
+                            </button>
+                            <button onClick={() => handleExport('json')} disabled={exporting}
+                                className="px-4 py-2 bg-slate-600/20 text-slate-400 border border-slate-500/30 rounded-xl font-medium hover:bg-slate-600/30 transition-all text-sm disabled:opacity-50">
+                                📥 JSON
+                            </button>
+                        </div>
+                    </div>
+                    <div className="overflow-x-auto rounded-2xl border border-white/10">
+                        <table className="w-full">
+                            <thead>
+                                <tr className="bg-white/5">
+                                    {["Date", "Newspaper", "Headline", "Theme", "Sentiment", "Importance"].map(h => (
+                                        <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-400 uppercase">{h}</th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5">
+                                {articles.map(article => (
+                                    <tr key={article._id} className="hover:bg-white/5 transition-colors">
+                                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-300">{article.date}</td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-400">{article.newspaper}</td>
+                                        <td className="px-4 py-3 text-sm font-semibold text-white max-w-xs truncate" title={article.headline}>{article.headline}</td>
+                                        <td className="px-4 py-3 whitespace-nowrap">
+                                            <span className="px-2.5 py-1 bg-blue-500/20 text-blue-300 rounded-full text-xs font-semibold">{article.theme}</span>
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap">
+                                            <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
+                                                article.sentiment === "Positive" ? "bg-emerald-500/20 text-emerald-300" :
+                                                article.sentiment === "Negative" ? "bg-rose-500/20 text-rose-300" :
+                                                "bg-slate-500/20 text-slate-300"
+                                            }`}>{article.sentiment}</span>
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap">
+                                            <span className={`text-sm font-bold ${
+                                                article.importance === "Critical" ? "text-red-400" :
+                                                article.importance === "High" ? "text-orange-400" : "text-slate-400"
+                                            }`}>{article.importance}</span>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                    {pagination.pages > 1 && (
+                        <div className="flex justify-center gap-2 mt-6">
+                            {Array.from({ length: Math.min(pagination.pages, 5) }, (_, i) => i + 1).map(page => (
+                                <button key={page} onClick={() => fetchArticles(page)}
+                                    className={`w-10 h-10 rounded-xl font-semibold text-sm transition-all ${
+                                        pagination.page === page ? "bg-blue-600 text-white shadow-lg" : "bg-white/5 text-slate-400 hover:bg-white/10"
+                                    }`}>
+                                    {page}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const AITab = ({ articles }) => {
+            const [brief, setBrief] = useState("");
+            const [loading, setLoading] = useState(false);
+
+            const generateBrief = async () => {
+                if (articles.length === 0) { alert("No articles to analyze."); return; }
+                setLoading(true);
+                try {
+                    const data = await api.generateBrief(articles);
+                    setBrief(data.brief);
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="glass rounded-3xl p-6 md:p-8 shadow-xl">
+                    <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+                        <h3 className="text-xl font-bold text-white">🤖 AI Intelligence Brief</h3>
+                        <div className="flex gap-3">
+                            <button onClick={generateBrief} disabled={loading || articles.length === 0}
+                                className="bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white px-6 py-3 rounded-xl font-bold hover:from-violet-700 hover:to-fuchsia-700 transform hover:scale-105 transition-all shadow-lg shadow-violet-500/25 disabled:opacity-50">
+                                {loading ? "🔄 Generating..." : "✨ Generate Brief"}
+                            </button>
+                            {brief && (
+                                <button onClick={() => {
+                                    const blob = new Blob([brief], { type: "text/markdown" });
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement("a");
+                                    a.href = url;
+                                    a.download = `ntkma-brief-${new Date().toISOString().split('T')[0]}.md`;
+                                    a.click();
+                                }} className="px-4 py-3 bg-slate-700 text-white rounded-xl font-semibold hover:bg-slate-600 transition-all">
+                                    📥 Download
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    {brief && (
+                        <div className="p-6 md:p-8 rounded-2xl bg-gradient-to-br from-violet-950/30 to-fuchsia-950/30 border border-violet-500/20">
+                            <pre className="whitespace-pre-wrap text-slate-300 leading-relaxed font-mono text-sm overflow-x-auto">{brief}</pre>
+                        </div>
+                    )}
+                    {!brief && !loading && (
+                        <div className="text-center py-16">
+                            <div className="text-5xl mb-4">🤖</div>
+                            <p className="text-slate-500 font-medium">Click "Generate Brief" to analyze {articles.length} articles</p>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const ScraperTab = ({ status, onToggle, onRun }) => {
+            const [running, setRunning] = useState(false);
+            const [result, setResult] = useState(null);
+
+            const handleRun = async () => {
+                setRunning(true);
+                try {
+                    const data = await onRun();
+                    setResult(data);
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    setRunning(false);
+                }
+            };
+
+            return (
+                <div className="glass rounded-3xl p-6 md:p-8 shadow-xl">
+                    <h3 className="text-xl font-bold text-white mb-6">🔧 Web Scraping Control</h3>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                        <div className="p-6 rounded-2xl bg-white/5 border border-white/10">
+                            <h4 className="text-lg font-semibold text-white mb-4">Scraper Status</h4>
+                            <div className="flex items-center gap-3 mb-4">
+                                <div className={`w-3 h-3 rounded-full ${status?.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}></div>
+                                <span className="text-slate-300">{status?.enabled ? 'ACTIVE' : 'INACTIVE'}</span>
+                            </div>
+                            <button onClick={onToggle}
+                                className={`w-full py-3 rounded-xl font-bold transition-all ${
+                                    status?.enabled 
+                                        ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30'
+                                        : 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 border border-emerald-500/30'
+                                }`}>
+                                {status?.enabled ? '⏹️ Disable Scraper' : '▶️ Enable Scraper'}
+                            </button>
+                        </div>
+
+                        <div className="p-6 rounded-2xl bg-white/5 border border-white/10">
+                            <h4 className="text-lg font-semibold text-white mb-4">Manual Scrape</h4>
+                            <p className="text-sm text-slate-400 mb-4">Run scraper now to fetch latest articles from configured sources.</p>
+                            <button onClick={handleRun} disabled={running || !status?.enabled}
+                                className="w-full py-3 bg-blue-600/20 text-blue-400 border border-blue-500/30 rounded-xl font-bold hover:bg-blue-600/30 transition-all disabled:opacity-50">
+                                {running ? '🔄 Scraping...' : '🔍 Run Scraper Now'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {result && (
+                        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                            ✅ {result.msg}
+                        </div>
+                    )}
+
+                    {status?.logs && status.logs.length > 0 && (
+                        <div className="mt-6">
+                            <h4 className="text-lg font-semibold text-white mb-4">Recent Logs</h4>
+                            <div className="space-y-2 max-h-64 overflow-y-auto">
+                                {status.logs.map((log, i) => (
+                                    <div key={i} className="p-3 rounded-lg bg-white/5 text-sm text-slate-400 flex justify-between">
+                                        <span>{log.action}</span>
+                                        <span className="text-slate-600">{new Date(log.time).toLocaleString()}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const MonitorTab = () => {
+            const sources = [
+                { name: "Google News", url: "https://news.google.com/search?q=Nashik+Kumbh+2027", icon: "🌐" },
+                { name: "Times of India", url: "https://timesofindia.indiatimes.com/city/nashik", icon: "📰" },
+                { name: "Sakal", url: "https://www.sakal.com/", icon: "📖" },
+                { name: "Lokmat", url: "https://www.lokmat.com/nashik/", icon: "🗞️" },
+                { name: "Maharashtra Times", url: "https://maharashtratimes.com/", icon: "📄" },
+                { name: "Divya Marathi", url: "https://divyamarathi.bhaskar.com/", icon: "📰" }
+            ];
+            return (
+                <div className="glass rounded-3xl p-6 shadow-xl">
+                    <h3 className="text-xl font-bold text-white mb-6">🔍 News Monitor</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {sources.map(source => (
+                            <a key={source.name} href={source.url} target="_blank" rel="noopener noreferrer"
+                                className="group p-6 rounded-2xl bg-gradient-to-br from-blue-950/50 to-indigo-950/30 border border-blue-500/20 hover:border-blue-400/40 transition-all text-center card-hover">
+                                <div className="text-4xl mb-3 group-hover:scale-110 transition-transform">{source.icon}</div>
+                                <h3 className="font-bold text-lg text-white mb-1 group-hover:text-blue-300 transition-colors">{source.name}</h3>
+                                <p className="text-sm text-blue-400/70 font-medium">Open in New Tab →</p>
+                            </a>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        // Main App
+        const App = () => {
+            const [user, setUser] = useState(() => {
+                try { return JSON.parse(localStorage.getItem("ntkma_user")); } catch { return null; }
+            });
+            const [articles, setArticles] = useState([]);
+            const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
+            const [loading, setLoading] = useState(true);
+            const [query, setQuery] = useState("");
+            const [themeFilter, setThemeFilter] = useState("All");
+            const [sentimentFilter, setSentimentFilter] = useState("All");
+            const [activeTab, setActiveTab] = useState("dashboard");
+            const [scraperStatus, setScraperStatus] = useState(null);
+
+            const fetchArticles = useCallback(async (page = 1) => {
+                setLoading(true);
+                try {
+                    const data = await api.getArticles({
+                        query, theme: themeFilter, sentiment: sentimentFilter, page, limit: 20
+                    });
+                    setArticles(data.articles);
+                    setPagination(data.pagination);
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    setLoading(false);
+                }
+            }, [query, themeFilter, sentimentFilter]);
+
+            const fetchScraperStatus = useCallback(async () => {
+                try {
+                    const data = await api.getScraperStatus();
+                    setScraperStatus(data);
+                } catch (err) {
+                    console.error('Scraper status error:', err);
+                }
+            }, []);
+
+            useEffect(() => {
+                if (user) {
+                    fetchArticles(1);
+                    fetchScraperStatus();
+                }
+            }, [fetchArticles, fetchScraperStatus, user]);
+
+            const handleLogin = (userData) => {
+                setUser(userData);
+            };
+
+            const handleLogout = () => {
+                localStorage.removeItem("ntkma_token");
+                localStorage.removeItem("ntkma_user");
+                setUser(null);
+                setArticles([]);
+            };
+
+            const handleArticleAdded = (article) => {
+                setArticles(prev => [article, ...prev]);
+                setPagination(prev => ({ ...prev, total: prev.total + 1 }));
+            };
+
+            const handleToggleScraper = async () => {
+                try {
+                    const data = await api.toggleScraper();
+                    setScraperStatus(prev => ({ ...prev, enabled: data.enabled }));
+                } catch (err) {
+                    alert(err.message);
+                }
+            };
+
+            const handleRunScraper = async () => {
+                const data = await api.runScraper();
+                await fetchArticles(1);
+                await fetchScraperStatus();
+                return data;
+            };
+
+            const stats = useMemo(() => ({
+                total: pagination.total,
+                themes: [...new Set(articles.map(a => a.theme))].length,
+                positive: articles.filter(a => a.sentiment === "Positive").length,
+                negative: articles.filter(a => a.sentiment === "Negative").length,
+                critical: articles.filter(a => a.importance === "Critical").length
+            }), [articles, pagination]);
+
+            if (!user) {
+                return <LoginScreen onLogin={handleLogin} />;
+            }
+
+            return (
+                <div className="min-h-screen bg-slate-950">
+                    <Header stats={stats} activeTab={activeTab} setActiveTab={setActiveTab} 
+                        onLogout={handleLogout} user={user} 
+                        scraperStatus={scraperStatus} onToggleScraper={handleToggleScraper} />
+
+                    <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+                        <SearchBar 
+                            query={query} setQuery={setQuery}
+                            themeFilter={themeFilter} setThemeFilter={setThemeFilter}
+                            sentimentFilter={sentimentFilter} setSentimentFilter={setSentimentFilter}
+                        />
+
+                        {loading && articles.length === 0 ? (
+                            <div className="flex items-center justify-center py-20">
+                                <div className="text-center">
+                                    <div className="inline-block w-12 h-12 border-4 border-blue-900 border-t-blue-500 rounded-full animate-spin mb-4"></div>
+                                    <p className="text-slate-500 font-medium">Loading intelligence data...</p>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="slide-in">
+                                {activeTab === "dashboard" && <DashboardTab articles={articles} />}
+                                {activeTab === "add" && <AddNewsTab onArticleAdded={handleArticleAdded} />}
+                                {activeTab === "database" && <DatabaseTab articles={articles} pagination={pagination} fetchArticles={fetchArticles} />}
+                                {activeTab === "ai" && <AITab articles={articles} />}
+                                {activeTab === "scraper" && <ScraperTab status={scraperStatus} onToggle={handleToggleScraper} onRun={handleRunScraper} />}
+                                {activeTab === "monitor" && <MonitorTab />}
+                            </div>
+                        )}
+                    </main>
+
+                    <footer className="mt-12 py-8 text-center text-slate-600 text-sm">
+                        <p>© 2026 NTKMA Media Intelligence • Nashik-Trimbakeshwar Kumbh Mela Authority</p>
+                        <p className="mt-1">Built for production media monitoring • {articles.length} articles tracked</p>
+                    </footer>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
